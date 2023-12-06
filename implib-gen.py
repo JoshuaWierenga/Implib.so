@@ -389,11 +389,14 @@ Examples:
   parser.add_argument('--outdir', '-o',
                       help="Path to create wrapper at",
                       default='./')
-  parser.add_argument('--cosmo', '-c',
-                      help="Generate cosmo wrappers",
-                      action='store_true')
-  parser.add_argument('--headers', nargs='+',
-                      help="Headers to use for cosmo wrapper files",
+  parser.add_argument('--ctags',
+                      help="Path to Universal Ctags binary",
+                      default='')
+  parser.add_argument('--input-headers', nargs='+',
+                      help="Input headers to use for cosmo wrapper files",
+                      default='')
+  parser.add_argument('--output-headers', nargs='+',
+                      help="Output headers to use for cosmo wrapper files",
                       default='')
 
   args = parser.parse_args()
@@ -416,8 +419,9 @@ Examples:
     target = args.target.split('-')[0]
   quiet = args.quiet
   outdir = args.outdir
-  cosmo = args.cosmo
-  headers = args.headers
+  ctags = args.ctags
+  input_headers = args.input_headers
+  output_headers = args.output_headers
 
   if args.symbol_list is None:
     funs = None
@@ -602,8 +606,28 @@ Examples:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)
       f.write(vtable_text)
 
-  if not cosmo:
+  if not ctags or not input_headers:
     return
+
+  function_data = {}
+  for header in input_headers:
+    out, _ = run([ctags, '--sort=no', '--kinds-C=zp', '-o', '-', header])
+    return_type = ''
+    name = ''
+    parameter_types = []
+    for line in out.split('\n'):
+      if '\tp\t' in line:
+        if (return_type != ''):
+          function_data[name] =(return_type, parameter_types)
+        return_type = line.rsplit(':', 1)[1]
+        name = line.split('\t', 1)[0]
+        parameter_types = []
+      elif '\tz\t' in line and name != '':
+        parameter_types.append(line.rsplit('\t', 1)[0].rsplit(':', 1)[1])
+      function_data[name] = (return_type, parameter_types)
+
+  #for k, v in function_data.items():
+  #  print(f"{v[0]} {k}({', '.join(v[1])})")
 
   # TODO: Add automatic alignment and size checking for all supported arch/libc/os combinations
   # Generate wrapper header C code
@@ -615,9 +639,9 @@ Examples:
 
     with open(os.path.join(root, 'arch/common/wrapperheader.h.tpl'), 'r') as t:
       wrapperheader_tpl = string.Template(t.read())
-    for header in headers:
+    for header in [*input_headers, *output_headers]:
       wrapperheader_text = wrapperheader_tpl.substitute(
-        header=header
+        header=os.path.basename(header)
       )
       f.write(wrapperheader_text)
 
@@ -626,28 +650,23 @@ Examples:
     with open(os.path.join(root, 'arch/common/wrapperfuncinfo_noreturn.h.tpl'), 'r') as t:
       wrapperfuncinfo_noreturn_tpl = string.Template(t.read())
     for function_name in funs:
-      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
-      for line in out.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("$1"):
-          continue
-        parts = line[6:].split(' ', 1)
-        return_type = parts[0]
-        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
-        struct_fields = '\n  '.join(f"{param_name} p{i};" for i, param_name in enumerate(parameters_types))
-
-        if return_type != 'void':
-          wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
-            fields = struct_fields,
-            function_name = function_name,
-            return_type = return_type
-          )
-        else:
-          wrapperfuncinfo_text = wrapperfuncinfo_noreturn_tpl.substitute(
-            fields = struct_fields,
-            function_name = function_name
-          )
-        f.write(wrapperfuncinfo_text)
+      if function_name not in function_data:
+        continue
+      return_type = function_data[function_name][0]
+      parameters_types = function_data[function_name][1]
+      struct_fields = '\n  '.join(f"{param_name} p{i};" for i, param_name in enumerate(parameters_types))
+      if return_type != 'void':
+        wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
+          fields = struct_fields,
+          function_name = function_name,
+          return_type = return_type
+        )
+      else:
+        wrapperfuncinfo_text = wrapperfuncinfo_noreturn_tpl.substitute(
+          fields = struct_fields,
+          function_name = function_name
+        )
+      f.write(wrapperfuncinfo_text)
 
   # TODO: Convert to assembly?
   # Generate native wrapper C code
@@ -664,28 +683,23 @@ Examples:
     with open(os.path.join(root, 'arch/common/nativewrapper_noreturn.c.tpl'), 'r') as t:
       nativewrapper_noreturn_tpl = string.Template(t.read())
     for function_name in funs:
-      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
-      for line in out.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("$1"):
-          continue
-        parts = line[6:].split(' ', 1)
-        return_type = parts[0]
-        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
-        parameters_names = ', '.join(f"{function_name}params->p{i}" for i in range(0, len(parameters_types)))
-
-        if return_type != 'void':
-          nativewrapper_text = nativewrapper_tpl.substitute(
-            return_type = return_type,
-            function_name = function_name,
-            parameter_names = parameters_names
-          )
-        else:
-          nativewrapper_text = nativewrapper_noreturn_tpl.substitute(
-            function_name = function_name,
-            parameter_names = parameters_names
-          )
-        f.write(nativewrapper_text)
+      if function_name not in function_data:
+        continue
+      return_type = function_data[function_name][0]
+      parameters_types = function_data[function_name][1]
+      parameters_names = ', '.join(f"{function_name}params->p{i}" for i in range(0, len(parameters_types)))
+      if return_type != 'void':
+        nativewrapper_text = nativewrapper_tpl.substitute(
+          return_type = return_type,
+          function_name = function_name,
+          parameter_names = parameters_names
+        )
+      else:
+        nativewrapper_text = nativewrapper_noreturn_tpl.substitute(
+          function_name = function_name,
+          parameter_names = parameters_names
+        )
+      f.write(nativewrapper_text)
 
   # TODO: Convert to assembly?
   # Generate cosmo wrapper C code
@@ -702,31 +716,25 @@ Examples:
     with open(os.path.join(root, 'arch/common/cosmowrapper_noreturn.c.tpl'), 'r') as t:
       cosmowrapper_noreturn_tpl = string.Template(t.read())
     for function_name in funs:
-      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
-      for line in out.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("$1"):
-          continue
-        parts = line[6:].split(' ', 1)
-        return_type = parts[0]
-        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
-        parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
-        parameters_names = ', '.join(f"p{i}" for i in range(0, len(parameters_types)))
-
-
-        if return_type != 'void':
-          cosmowrapper_text = cosmowrapper_tpl.substitute(
-            return_type = return_type,
-            function_name = function_name,
-            parameters = parameters,
-            parameter_names = parameters_names
-          )
-        else:
-          cosmowrapper_text = cosmowrapper_noreturn_tpl.substitute(
-            function_name = function_name,
-            parameters = parameters
-          )
-        f.write(cosmowrapper_text)
+      if function_name not in function_data:
+        continue
+      return_type = function_data[function_name][0]
+      parameters_types = function_data[function_name][1]
+      parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
+      parameters_names = ', '.join(f"p{i}" for i in range(0, len(parameters_types)))
+      if return_type != 'void':
+        cosmowrapper_text = cosmowrapper_tpl.substitute(
+          return_type = return_type,
+          function_name = function_name,
+          parameters = parameters,
+          parameter_names = parameters_names
+        )
+      else:
+        cosmowrapper_text = cosmowrapper_noreturn_tpl.substitute(
+          function_name = function_name,
+          parameters = parameters
+        )
+      f.write(cosmowrapper_text)
 
 if __name__ == '__main__':
   main()
