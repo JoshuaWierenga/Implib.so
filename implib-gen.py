@@ -389,6 +389,12 @@ Examples:
   parser.add_argument('--outdir', '-o',
                       help="Path to create wrapper at",
                       default='./')
+  parser.add_argument('--cosmo', '-c',
+                      help="Generate cosmo wrappers",
+                      action='store_true')
+  parser.add_argument('--headers', nargs='+',
+                      help="Headers to use for cosmo wrapper files",
+                      default='')
 
   args = parser.parse_args()
 
@@ -410,6 +416,8 @@ Examples:
     target = args.target.split('-')[0]
   quiet = args.quiet
   outdir = args.outdir
+  cosmo = args.cosmo
+  headers = args.headers
 
   if args.symbol_list is None:
     funs = None
@@ -568,7 +576,7 @@ Examples:
         number=i)
       f.write(tramp_text)
 
-  # Generate C code
+  # Generate init C code
 
   init_file = f'{suffix}.init.c'
   with open(os.path.join(outdir, init_file), 'w') as f:
@@ -593,6 +601,132 @@ Examples:
     if args.vtables:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)
       f.write(vtable_text)
+
+  if not cosmo:
+    return
+
+  # TODO: Add automatic alignment and size checking for all supported arch/libc/os combinations
+  # Generate wrapper header C code
+
+  headerwrapper_file = f'{suffix}.headerwrapper.h'
+  with open(os.path.join(outdir, headerwrapper_file), 'w') as f:
+    if not quiet:
+      print(f"Generating {headerwrapper_file}...")
+
+    with open(os.path.join(root, 'arch/common/wrapperheader.h.tpl'), 'r') as t:
+      wrapperheader_tpl = string.Template(t.read())
+    for header in headers:
+      wrapperheader_text = wrapperheader_tpl.substitute(
+        header=header
+      )
+      f.write(wrapperheader_text)
+
+    with open(os.path.join(root, 'arch/common/wrapperfuncinfo.h.tpl'), 'r') as t:
+      wrapperfuncinfo_tpl = string.Template(t.read())
+    with open(os.path.join(root, 'arch/common/wrapperfuncinfo_noreturn.h.tpl'), 'r') as t:
+      wrapperfuncinfo_noreturn_tpl = string.Template(t.read())
+    for function_name in funs:
+      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
+      for line in out.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("$1"):
+          continue
+        parts = line[6:].split(' ', 1)
+        return_type = parts[0]
+        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
+        struct_fields = '\n  '.join(f"{param_name} p{i};" for i, param_name in enumerate(parameters_types))
+
+        if return_type != 'void':
+          wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
+            fields = struct_fields,
+            function_name = function_name,
+            return_type = return_type
+          )
+        else:
+          wrapperfuncinfo_text = wrapperfuncinfo_noreturn_tpl.substitute(
+            fields = struct_fields,
+            function_name = function_name
+          )
+        f.write(wrapperfuncinfo_text)
+
+  # TODO: Convert to assembly?
+  # Generate native wrapper C code
+
+  nativewrapper_file = f'{suffix}.nativewrapper.c'
+  with open(os.path.join(outdir, nativewrapper_file), 'w') as f:
+    if not quiet:
+      print(f"Generating {nativewrapper_file}...")
+
+    f.write(f'#include "{headerwrapper_file}"\n\n')
+
+    with open(os.path.join(root, 'arch/common/nativewrapper.c.tpl'), 'r') as t:
+      nativewrapper_tpl = string.Template(t.read())
+    with open(os.path.join(root, 'arch/common/nativewrapper_noreturn.c.tpl'), 'r') as t:
+      nativewrapper_noreturn_tpl = string.Template(t.read())
+    for function_name in funs:
+      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
+      for line in out.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("$1"):
+          continue
+        parts = line[6:].split(' ', 1)
+        return_type = parts[0]
+        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
+        parameters_names = ', '.join(f"{function_name}params->p{i}" for i in range(0, len(parameters_types)))
+
+        if return_type != 'void':
+          nativewrapper_text = nativewrapper_tpl.substitute(
+            return_type = return_type,
+            function_name = function_name,
+            parameter_names = parameters_names
+          )
+        else:
+          nativewrapper_text = nativewrapper_noreturn_tpl.substitute(
+            function_name = function_name,
+            parameter_names = parameters_names
+          )
+        f.write(nativewrapper_text)
+
+  # TODO: Convert to assembly?
+  # Generate cosmo wrapper C code
+
+  cosmowrapper_file = f'{suffix}.cosmowrapper.c'
+  with open(os.path.join(outdir, cosmowrapper_file), 'w') as f:
+    if not quiet:
+      print(f"Generating {cosmowrapper_file}...")
+
+    f.write(f'#include "{headerwrapper_file}"\n\n')
+
+    with open(os.path.join(root, 'arch/common/cosmowrapper.c.tpl'), 'r') as t:
+      cosmowrapper_tpl = string.Template(t.read())
+    with open(os.path.join(root, 'arch/common/cosmowrapper_noreturn.c.tpl'), 'r') as t:
+      cosmowrapper_noreturn_tpl = string.Template(t.read())
+    for function_name in funs:
+      out, _ = run(['gdb', '-q', '-nx', input_name, '-ex', 'set width 0', '-ex', 'p ' + function_name])
+      for line in out.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("$1"):
+          continue
+        parts = line[6:].split(' ', 1)
+        return_type = parts[0]
+        parameters_types = parts[1][1:].split(')', 1)[0].split(', ')
+        parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
+        parameters_names = ', '.join(f"p{i}" for i in range(0, len(parameters_types)))
+
+
+        if return_type != 'void':
+          cosmowrapper_text = cosmowrapper_tpl.substitute(
+            return_type = return_type,
+            function_name = function_name,
+            parameters = parameters,
+            parameter_names = parameters_names
+          )
+        else:
+          cosmowrapper_text = cosmowrapper_noreturn_tpl.substitute(
+            function_name = function_name,
+            parameters = parameters
+          )
+        f.write(cosmowrapper_text)
 
 if __name__ == '__main__':
   main()
