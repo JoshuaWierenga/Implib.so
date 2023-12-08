@@ -11,6 +11,9 @@
 #define _GNU_SOURCE // For RTLD_DEFAULT
 #endif
 
+#ifdef __COSMOPOLITAN__
+#include <cosmo.h>
+#endif
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +50,12 @@ static int is_lib_loading;
 
 #if ! NO_DLOPEN
 static void *load_library() {
+#ifdef __COSMOPOLITAN__
+  if (IsWindows()) {
+    return NULL;
+  }
+#endif
+
   if(lib_handle)
     return lib_handle;
 
@@ -91,6 +100,12 @@ extern void *_${lib_suffix}_tramp_table[];
 
 // Can be sped up by manually parsing library symtab...
 void _${lib_suffix}_tramp_resolve(int i) {
+#ifdef __COSMOPOLITAN__
+  if (IsWindows()) {
+    return;
+  }
+#endif
+
   assert((unsigned)i < SYM_COUNT);
 
   CHECK(!is_lib_loading, "library function '%s' called during library load", sym_names[i]);

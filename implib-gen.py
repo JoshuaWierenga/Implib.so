@@ -398,6 +398,9 @@ Examples:
   parser.add_argument('--output-headers', nargs='+',
                       help="Output headers to use for cosmo wrapper files",
                       default='')
+  parser.add_argument('--windows-library',
+                      help="Path to windows shared library",
+                      default='')
 
   args = parser.parse_args()
 
@@ -422,6 +425,7 @@ Examples:
   ctags = args.ctags
   input_headers = args.input_headers
   output_headers = args.output_headers
+  windows_library = args.windows_library
 
   if args.symbol_list is None:
     funs = None
@@ -606,31 +610,45 @@ Examples:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)
       f.write(vtable_text)
 
-  if not ctags or not input_headers:
+  if not ctags or not input_headers or not windows_library:
     return
 
   function_data = {}
   for header in input_headers:
-    out, _ = run([ctags, '--sort=no', '--kinds-C=zp', '-o', '-', header])
+    out, _ = run([ctags, '--sort=no', '--fields=+S', '--kinds-C=zpf', '-o', '-', header])
     return_type = ''
     name = ''
     parameter_types = []
     for line in out.split('\n'):
+      # Function in header, ignore it and any of its parameters 
+      if '\tf\t' in line:
+          name = ''
+      # Function in c file
       if '\tp\t' in line:
         if (return_type != ''):
           function_data[name] =(return_type, parameter_types)
-        return_type = line.rsplit(':', 1)[1]
-        name = line.split('\t', 1)[0]
+        signature_split = line.rsplit(':', 1)
+        #TODO: Support vararg functions
+        if '...' in signature_split[1]:
+          name = ''
+          continue
+        return_type = signature_split[0][:-10].rsplit(':', 1)[1]
+        name = signature_split[0].split('\t', 1)[0]
         parameter_types = []
+      # Parameter for previous found function
       elif '\tz\t' in line and name != '':
-        parameter_types.append(line.rsplit('\t', 1)[0].rsplit(':', 1)[1])
-      function_data[name] = (return_type, parameter_types)
+        parameter_split = line.rsplit('\t', 1)[0].rsplit(':', 2)
+        parameter_type = parameter_split[2].replace('[]', '*')
+        if parameter_split[1] == 'struct':
+          parameter_type = 'struct ' + parameter_type
+        parameter_types.append(parameter_type)
+    function_data[name] = (return_type, parameter_types)
 
   #for k, v in function_data.items():
   #  print(f"{v[0]} {k}({', '.join(v[1])})")
 
   # TODO: Add automatic alignment and size checking for all supported arch/libc/os combinations
-  # Generate wrapper header C code
+  # Generate wrapper header C code for cosmo
 
   headerwrapper_file = f'{suffix}.headerwrapper.h'
   with open(os.path.join(outdir, headerwrapper_file), 'w') as f:
@@ -668,8 +686,8 @@ Examples:
         )
       f.write(wrapperfuncinfo_text)
 
-  # TODO: Convert to assembly?
-  # Generate native wrapper C code
+  # TODO: Convert to assembly, required to support varargs
+  # Generate native wrapper C code for cosmo
 
   nativewrapper_file = f'{suffix}.nativewrapper.c'
   with open(os.path.join(outdir, nativewrapper_file), 'w') as f:
@@ -701,15 +719,15 @@ Examples:
         )
       f.write(nativewrapper_text)
 
-  # TODO: Convert to assembly?
-  # Generate cosmo wrapper C code
+  # TODO: Convert to assembly, required to support varargs
+  # Generate cosmo wrapper C code for cosmo
 
   cosmowrapper_file = f'{suffix}.cosmowrapper.c'
   with open(os.path.join(outdir, cosmowrapper_file), 'w') as f:
     if not quiet:
       print(f"Generating {cosmowrapper_file}...")
 
-    f.write(f'#include "{headerwrapper_file}"\n\n')
+    f.write(f'#include <cosmo.h>\n#include <dlfcn.h>\n#include "{headerwrapper_file}"\n\n');
 
     with open(os.path.join(root, 'arch/common/cosmowrapper.c.tpl'), 'r') as t:
       cosmowrapper_tpl = string.Template(t.read())
@@ -732,9 +750,31 @@ Examples:
       else:
         cosmowrapper_text = cosmowrapper_noreturn_tpl.substitute(
           function_name = function_name,
-          parameters = parameters
+          parameters = parameters,
+          parameter_names = parameters_names
         )
       f.write(cosmowrapper_text)
+      
+    with open(os.path.join(root, 'arch/common/cosmowrapper_constructor.c.tpl'), 'r') as t:
+      cosmowrapper_constructor_tpl = string.Template(t.read())
+    f.write('''__attribute__((constructor)) void setup(void) {
+  if(!IsWindows()) {
+    return;
+  }
+
+  void *handle = cosmo_dlopen("''' + windows_library + '''", RTLD_LAZY);
+  if (!handle) {
+    tinyprint(2, cosmo_dlerror(), "\\n", NULL);
+    exit(1);
+  }\n\n''')
+    for function_name in funs:
+      if function_name not in function_data:
+        continue
+      cosmowrapper_constructor_text = cosmowrapper_constructor_tpl.substitute(
+        function_name = function_name,
+      )
+      f.write(cosmowrapper_constructor_text)
+    f.write('}\n\n')
 
 if __name__ == '__main__':
   main()
