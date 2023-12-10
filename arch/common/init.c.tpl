@@ -50,23 +50,31 @@ static int is_lib_loading;
 
 #if ! NO_DLOPEN
 static void *load_library() {
-#ifdef __COSMOPOLITAN__
-  if (IsWindows()) {
-    return NULL;
-  }
-#endif
-
   if(lib_handle)
     return lib_handle;
 
   is_lib_loading = 1;
 
+#ifdef __COSMOPOLITAN__
+  char load_name_mingw[] = "$load_name_mingw";
+  char load_name_glibc[] = "$load_name_glibc";
+  char *load_name;
+
+  if (IsLinux()) {
+    load_name = load_name_glibc;
+  } else {
+    load_name = load_name_mingw;
+  }
+#else
+  const char *load_name = "$load_name";
+#endif
+
 #if HAS_DLOPEN_CALLBACK
   extern void *$dlopen_callback(const char *lib_name);
-  lib_handle = $dlopen_callback("$load_name");
+  lib_handle = $dlopen_callback(load_name);
   CHECK(lib_handle, "failed to load library '$load_name' via callback '$dlopen_callback'");
 #else
-  lib_handle = dlopen("$load_name", RTLD_LAZY | RTLD_GLOBAL);
+  lib_handle = dlopen(load_name, RTLD_LAZY | RTLD_GLOBAL);
   CHECK(lib_handle, "failed to load library '$load_name' via dlopen: %s", dlerror());
 #endif
 
@@ -100,12 +108,6 @@ extern void *_${lib_suffix}_tramp_table[];
 
 // Can be sped up by manually parsing library symtab...
 void _${lib_suffix}_tramp_resolve(int i) {
-#ifdef __COSMOPOLITAN__
-  if (IsWindows()) {
-    return;
-  }
-#endif
-
   assert((unsigned)i < SYM_COUNT);
 
   CHECK(!is_lib_loading, "library function '%s' called during library load", sym_names[i]);

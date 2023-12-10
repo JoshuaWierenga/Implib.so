@@ -18,6 +18,7 @@ import subprocess
 import argparse
 import string
 import configparser
+import pathlib
 
 me = os.path.basename(__file__)
 root = os.path.dirname(__file__)
@@ -398,9 +399,6 @@ Examples:
   parser.add_argument('--output-headers', nargs='+',
                       help="Output headers to use for cosmo wrapper files",
                       default='')
-  parser.add_argument('--windows-library',
-                      help="Path to windows shared library",
-                      default='')
 
   args = parser.parse_args()
 
@@ -425,7 +423,6 @@ Examples:
   ctags = args.ctags
   input_headers = args.input_headers
   output_headers = args.output_headers
-  windows_library = args.windows_library
 
   if args.symbol_list is None:
     funs = None
@@ -444,6 +441,10 @@ Examples:
     load_name = read_soname(input_name)
     if load_name is None:
       load_name = os.path.basename(input_name)
+
+  # load_name most likely already ends in .so but can make sure
+  load_name_glibc = pathlib.Path(load_name).with_suffix('.so')
+  load_name_mingw = pathlib.Path(load_name).with_suffix('.dll')
 
   # Collect target info
 
@@ -598,6 +599,8 @@ Examples:
       init_text = string.Template(t.read()).substitute(
         lib_suffix=lib_suffix,
         load_name=load_name,
+        load_name_glibc=load_name_glibc,
+        load_name_mingw=load_name_mingw,
         dlopen_callback=dlopen_callback,
         dlsym_callback=dlsym_callback,
         has_dlopen_callback=int(bool(dlopen_callback)),
@@ -610,7 +613,7 @@ Examples:
       vtable_text = generate_vtables(cls_tables, cls_syms, cls_data)
       f.write(vtable_text)
 
-  if not ctags or not input_headers or not windows_library:
+  if not ctags or not input_headers:
     return
 
   function_data = {}
@@ -727,7 +730,7 @@ Examples:
     if not quiet:
       print(f"Generating {cosmowrapper_file}...")
 
-    f.write(f'#include <cosmo.h>\n#include <dlfcn.h>\n#include "{headerwrapper_file}"\n\n');
+    f.write(f'#include "{headerwrapper_file}"\n\n');
 
     with open(os.path.join(root, 'arch/common/cosmowrapper.c.tpl'), 'r') as t:
       cosmowrapper_tpl = string.Template(t.read())
@@ -754,27 +757,6 @@ Examples:
           parameter_names = parameters_names
         )
       f.write(cosmowrapper_text)
-      
-    with open(os.path.join(root, 'arch/common/cosmowrapper_constructor.c.tpl'), 'r') as t:
-      cosmowrapper_constructor_tpl = string.Template(t.read())
-    f.write('''__attribute__((constructor)) void setup(void) {
-  if(!IsWindows()) {
-    return;
-  }
-
-  void *handle = cosmo_dlopen("''' + windows_library + '''", RTLD_LAZY);
-  if (!handle) {
-    tinyprint(2, cosmo_dlerror(), "\\n", NULL);
-    exit(1);
-  }\n\n''')
-    for function_name in funs:
-      if function_name not in function_data:
-        continue
-      cosmowrapper_constructor_text = cosmowrapper_constructor_tpl.substitute(
-        function_name = function_name,
-      )
-      f.write(cosmowrapper_constructor_text)
-    f.write('}\n\n')
 
 if __name__ == '__main__':
   main()
