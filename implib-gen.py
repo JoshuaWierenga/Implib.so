@@ -628,27 +628,50 @@ Examples:
           name = ''
       # Function in c file
       if '\tp\t' in line:
-        if (return_type != ''):
-          function_data[name] =(return_type, parameter_types)
+        if name != '':
+          # This should match what c++filt gives with its spaces removed
+          demangled_name = f"{namespace}{name}({', '.join(parameter_types)})".replace(' ', '')
+          sym = next((sym for sym in syms if sym['Name'] == name or sym['Demangled Name'].replace(' ', '') == demangled_name), None)
+          if sym:
+            function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
         signature_split = line.rsplit(':', 1)
-        #TODO: Support vararg functions
+        # TODO: Support vararg functions
         if '...' in signature_split[1]:
           name = ''
           continue
-        return_type = signature_split[0][:-10].rsplit(':', 1)[1]
+        typename_split = signature_split[0][:-10].rsplit(':', 1) # 10 is len("signature")
+        return_type = typename_split[1]
+        # TODO: Support functions with byref return types
+        if '&' in return_type:
+          name = ''
+          continue
+        namespace_split = typename_split[0][:-17].rsplit(':', 1) # 17 is len("typeref:typename")
+        if namespace_split[0].endswith('namespace') or namespace_split[0].endswith('class'):
+          namespace = namespace_split[1] + '::'
+        else:
+          namespace = ''
         name = signature_split[0].split('\t', 1)[0]
         parameter_types = []
       # Parameter for previous found function
       elif '\tz\t' in line and name != '':
         parameter_split = line.rsplit('\t', 1)[0].rsplit(':', 2)
         parameter_type = parameter_split[2].replace('[]', '*')
+        # TODO: Support functions with byref parameters
+        if '&' in parameter_type:
+          name = ''
+          continue
         if parameter_split[1] == 'struct':
           parameter_type = 'struct ' + parameter_type
         parameter_types.append(parameter_type)
-    function_data[name] = (return_type, parameter_types)
+    if name != '':
+      # This should match what c++filt gives with its spaces removed
+      demangled_name = f"{namespace}{name}({', '.join(parameter_types)})".replace(' ', '')
+      sym = next((sym for sym in syms if sym['Demangled Name'].replace(' ', '') == demangled_name), None)
+      if sym:
+        function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
 
-  #for k, v in function_data.items():
-  #  print(f"{v[0]} {k}({', '.join(v[1])})")
+  #for f in function_data.values():
+  #  print(f"{f[0]} {f[2]}{f[3]}({', '.join(f[1])})")
 
   # TODO: Add automatic alignment and size checking for all supported arch/libc/os combinations
   # Generate wrapper header C code for cosmo
@@ -665,6 +688,12 @@ Examples:
         header=os.path.basename(header)
       )
       f.write(wrapperheader_text)
+
+    f.write('''#ifdef __cplusplus
+extern "C" {
+#endif
+
+''')
 
     with open(os.path.join(root, 'arch/common/wrapperfuncinfo.h.tpl'), 'r') as t:
       wrapperfuncinfo_tpl = string.Template(t.read())
@@ -688,6 +717,10 @@ Examples:
           function_name = function_name
         )
       f.write(wrapperfuncinfo_text)
+    f.write('''#ifdef __cplusplus
+}
+#endif
+''')
 
   # TODO: Convert to assembly, required to support varargs
   # Generate native wrapper C code for cosmo
@@ -708,16 +741,19 @@ Examples:
         continue
       return_type = function_data[function_name][0]
       parameters_types = function_data[function_name][1]
+      namespace = function_data[function_name][2]
+      demangled_name = function_data[function_name][3]
       parameters_names = ', '.join(f"{function_name}params->p{i}" for i in range(0, len(parameters_types)))
       if return_type != 'void':
         nativewrapper_text = nativewrapper_tpl.substitute(
-          return_type = return_type,
           function_name = function_name,
+          full_demangled_function_name = f"{namespace}{demangled_name}",
           parameter_names = parameters_names
         )
       else:
         nativewrapper_text = nativewrapper_noreturn_tpl.substitute(
           function_name = function_name,
+          full_demangled_function_name = f"{namespace}{demangled_name}",
           parameter_names = parameters_names
         )
       f.write(nativewrapper_text)
@@ -730,7 +766,7 @@ Examples:
     if not quiet:
       print(f"Generating {cosmowrapper_file}...")
 
-    f.write(f'#include "{headerwrapper_file}"\n\n');
+    f.write(f'#include "{headerwrapper_file}"\n\nCOSMOPOLITAN_C_START_\n\n');
 
     with open(os.path.join(root, 'arch/common/cosmowrapper.c.tpl'), 'r') as t:
       cosmowrapper_tpl = string.Template(t.read())
@@ -757,6 +793,7 @@ Examples:
           parameter_names = parameters_names
         )
       f.write(cosmowrapper_text)
+    f.write('COSMOPOLITAN_C_END_\n')
 
 if __name__ == '__main__':
   main()
