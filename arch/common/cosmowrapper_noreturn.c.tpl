@@ -1,5 +1,8 @@
-void ${function_name}(${parameters}) {
-  ${function_name}Params_t params = {${parameter_names}};
-  ${function_name}_wrapper(&params);
+void $function_name($parameters) {
+  if (IsWindows()) {
+    ${function_name}_nt($parameter_names);
+    return;
+  }
+  ${function_name}_sysv($parameter_names);
 }
 

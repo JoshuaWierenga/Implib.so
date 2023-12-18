@@ -666,7 +666,7 @@ Examples:
     if name != '':
       # This should match what c++filt gives with its spaces removed
       demangled_name = f"{namespace}{name}({', '.join(parameter_types)})".replace(' ', '')
-      sym = next((sym for sym in syms if sym['Demangled Name'].replace(' ', '') == demangled_name), None)
+      sym = next((sym for sym in syms if sym['Name'] == name or sym['Demangled Name'].replace(' ', '') == demangled_name), None)
       if sym:
         function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
 
@@ -676,87 +676,31 @@ Examples:
   # TODO: Add automatic alignment and size checking for all supported arch/libc/os combinations
   # Generate wrapper header C code for cosmo
 
-  headerwrapper_file = f'{suffix}.headerwrapper.h'
+  headerwrapper_file = f'{suffix}.cosmowrapper.h'
   with open(os.path.join(outdir, headerwrapper_file), 'w') as f:
     if not quiet:
       print(f"Generating {headerwrapper_file}...")
 
     with open(os.path.join(root, 'arch/common/wrapperheader.h.tpl'), 'r') as t:
       wrapperheader_tpl = string.Template(t.read())
-    for header in [*input_headers, *output_headers]:
+    for header in ['cosmo.h', *input_headers, *output_headers]:
       wrapperheader_text = wrapperheader_tpl.substitute(
         header=os.path.basename(header)
       )
       f.write(wrapperheader_text)
 
-    f.write('''#ifdef __cplusplus
-extern "C" {
-#endif
-
-''')
+    f.write('COSMOPOLITAN_C_START_\n\n')
 
     with open(os.path.join(root, 'arch/common/wrapperfuncinfo.h.tpl'), 'r') as t:
       wrapperfuncinfo_tpl = string.Template(t.read())
-    with open(os.path.join(root, 'arch/common/wrapperfuncinfo_noreturn.h.tpl'), 'r') as t:
-      wrapperfuncinfo_noreturn_tpl = string.Template(t.read())
     for function_name in funs:
       if function_name not in function_data:
         continue
-      return_type = function_data[function_name][0]
-      parameters_types = function_data[function_name][1]
-      struct_fields = '\n  '.join(f"{param_name} p{i};" for i, param_name in enumerate(parameters_types))
-      if return_type != 'void':
-        wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
-          fields = struct_fields,
-          function_name = function_name,
-          return_type = return_type
-        )
-      else:
-        wrapperfuncinfo_text = wrapperfuncinfo_noreturn_tpl.substitute(
-          fields = struct_fields,
-          function_name = function_name
-        )
+      wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
+        function_name = function_name
+      )
       f.write(wrapperfuncinfo_text)
-    f.write('''#ifdef __cplusplus
-}
-#endif
-''')
-
-  # TODO: Convert to assembly, required to support varargs
-  # Generate native wrapper C code for cosmo
-
-  nativewrapper_file = f'{suffix}.nativewrapper.c'
-  with open(os.path.join(outdir, nativewrapper_file), 'w') as f:
-    if not quiet:
-      print(f"Generating {nativewrapper_file}...")
-
-    f.write(f'#include "{headerwrapper_file}"\n\n')
-
-    with open(os.path.join(root, 'arch/common/nativewrapper.c.tpl'), 'r') as t:
-      nativewrapper_tpl = string.Template(t.read())
-    with open(os.path.join(root, 'arch/common/nativewrapper_noreturn.c.tpl'), 'r') as t:
-      nativewrapper_noreturn_tpl = string.Template(t.read())
-    for function_name in funs:
-      if function_name not in function_data:
-        continue
-      return_type = function_data[function_name][0]
-      parameters_types = function_data[function_name][1]
-      namespace = function_data[function_name][2]
-      demangled_name = function_data[function_name][3]
-      parameters_names = ', '.join(f"{function_name}params->p{i}" for i in range(0, len(parameters_types)))
-      if return_type != 'void':
-        nativewrapper_text = nativewrapper_tpl.substitute(
-          function_name = function_name,
-          full_demangled_function_name = f"{namespace}{demangled_name}",
-          parameter_names = parameters_names
-        )
-      else:
-        nativewrapper_text = nativewrapper_noreturn_tpl.substitute(
-          function_name = function_name,
-          full_demangled_function_name = f"{namespace}{demangled_name}",
-          parameter_names = parameters_names
-        )
-      f.write(nativewrapper_text)
+    f.write('COSMOPOLITAN_C_END_\n')
 
   # TODO: Convert to assembly, required to support varargs
   # Generate cosmo wrapper C code for cosmo
@@ -766,7 +710,7 @@ extern "C" {
     if not quiet:
       print(f"Generating {cosmowrapper_file}...")
 
-    f.write(f'#include "{headerwrapper_file}"\n\nCOSMOPOLITAN_C_START_\n\n');
+    f.write(f'#include "{headerwrapper_file}"\n\n');
 
     with open(os.path.join(root, 'arch/common/cosmowrapper.c.tpl'), 'r') as t:
       cosmowrapper_tpl = string.Template(t.read())
@@ -793,7 +737,6 @@ extern "C" {
           parameter_names = parameters_names
         )
       f.write(cosmowrapper_text)
-    f.write('COSMOPOLITAN_C_END_\n')
 
 if __name__ == '__main__':
   main()
