@@ -696,8 +696,13 @@ Examples:
     for function_name in funs:
       if function_name not in function_data:
         continue
+      return_type = function_data[function_name][0]
+      parameters_types = function_data[function_name][1]
+      parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
       wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
-        function_name = function_name
+        return_type = return_type,
+        function_name = function_name,
+        parameters = parameters
       )
       f.write(wrapperfuncinfo_text)
     f.write('COSMOPOLITAN_C_END_\n')
