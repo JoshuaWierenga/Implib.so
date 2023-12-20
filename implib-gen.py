@@ -32,7 +32,7 @@ def error(msg):
   sys.stderr.write(f'{me}: error: {msg}\n')
   sys.exit(1)
 
-def run(args, stdin=''):
+def run(args, stdin='', stderr=subprocess.PIPE):
   """Runs external program and aborts on error."""
   env = os.environ.copy()
   # Force English language
@@ -42,10 +42,10 @@ def run(args, stdin=''):
   except KeyError:
     pass
   with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE, env=env) as p:
+                        stderr=stderr, env=env) as p:
     out, err = p.communicate(input=stdin.encode('utf-8'))
   out = out.decode('utf-8')
-  err = err.decode('utf-8')
+  err = None if stderr != subprocess.PIPE else err.decode('utf-8')
   if p.returncode != 0 or err:
     error(f"{args[0]} failed with retcode {p.returncode}:\n{err}")
   return out, err
@@ -323,6 +323,30 @@ def read_soname(f):
       return soname_match[1]
 
   return None
+
+# TODO: Get all mangled names at once for speed
+def get_mangled_name(namespace, name, return_type, parameter_types, headers):
+  demangled_name = f"{namespace}{name}({', '.join(parameter_types)})"
+  headers = '\\n '.join(f'#include "{header}"' for header in headers)
+  out, _ = run([root + '/scripts/mangle.sh', f"{demangled_name}", return_type, f"{headers}", "-I."], stderr=subprocess.DEVNULL)
+  if out == '':
+    return name
+  return out.replace('\n', '')
+
+def get_function_parameters_str(params):
+  parameters = []
+  for i, param_name in enumerate(params):
+    # array
+    if param_name[-1] == ']':
+      parameter_split = param_name.split('[', 1)
+      parameters.append(f'{parameter_split[0]} p{i}[{parameter_split[1]}')
+    # function pointer
+    elif '(*)' in param_name:
+      parameter_split = param_name.split('(*', 1)
+      parameters.append(f'{parameter_split[0]}(*p{i}{parameter_split[1]}')
+    else:
+      parameters.append(f'{param_name} p{i}')
+  return ', '.join(parameters)
 
 def main():
   """Driver function"""
@@ -616,6 +640,9 @@ Examples:
   if not ctags or not input_headers:
     return
 
+  #for sym in syms:
+  #  print(sym['Demangled Name'].replace(' ', ''))
+
   function_data = {}
   for header in input_headers:
     out, _ = run([ctags, '--sort=no', '--fields=+S', '--kinds-C=zpf', '-o', '-', header])
@@ -629,11 +656,12 @@ Examples:
       # Function in c file
       if '\tp\t' in line:
         if name != '':
-          # This should match what c++filt gives with its spaces removed
-          demangled_name = f"{namespace}{name}({', '.join(parameter_types)})".replace(' ', '')
-          sym = next((sym for sym in syms if sym['Name'] == name or sym['Demangled Name'].replace(' ', '') == demangled_name), None)
-          if sym:
-            function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
+          mangled_name = get_mangled_name(namespace, name, return_type, parameter_types, [*input_headers, *output_headers])
+          if mangled_name:
+            sym = next((sym for sym in syms if sym['Name'] == mangled_name), None)
+            if sym:
+              print(name, ', ', mangled_name, ', ', header, sep='')
+              function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
         signature_split = line.rsplit(':', 1)
         # TODO: Support vararg functions
         if '...' in signature_split[1]:
@@ -641,10 +669,6 @@ Examples:
           continue
         typename_split = signature_split[0][:-10].rsplit(':', 1) # 10 is len("signature")
         return_type = typename_split[1]
-        # TODO: Support functions with byref return types
-        if '&' in return_type:
-          name = ''
-          continue
         namespace_split = typename_split[0][:-17].rsplit(':', 1) # 17 is len("typeref:typename")
         if namespace_split[0].endswith('namespace') or namespace_split[0].endswith('class'):
           namespace = namespace_split[1] + '::'
@@ -656,19 +680,16 @@ Examples:
       elif '\tz\t' in line and name != '':
         parameter_split = line.rsplit('\t', 1)[0].rsplit(':', 2)
         parameter_type = parameter_split[2].replace('[]', '*')
-        # TODO: Support functions with byref parameters
-        if '&' in parameter_type:
-          name = ''
-          continue
         if parameter_split[1] == 'struct':
           parameter_type = 'struct ' + parameter_type
         parameter_types.append(parameter_type)
     if name != '':
-      # This should match what c++filt gives with its spaces removed
-      demangled_name = f"{namespace}{name}({', '.join(parameter_types)})".replace(' ', '')
-      sym = next((sym for sym in syms if sym['Name'] == name or sym['Demangled Name'].replace(' ', '') == demangled_name), None)
-      if sym:
-        function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
+      mangled_name = get_mangled_name(namespace, name, return_type, parameter_types, [*input_headers, *output_headers])
+      if mangled_name:
+        sym = next((sym for sym in syms if sym['Name'] == mangled_name), None)
+        if sym:
+          print(name, ', ', mangled_name, ', ', header, sep='')
+          function_data[sym['Name']] = (return_type, parameter_types, namespace, name)
 
   #for f in function_data.values():
   #  print(f"{f[0]} {f[2]}{f[3]}({', '.join(f[1])})")
@@ -697,8 +718,7 @@ Examples:
       if function_name not in function_data:
         continue
       return_type = function_data[function_name][0]
-      parameters_types = function_data[function_name][1]
-      parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
+      parameters = get_function_parameters_str(function_data[function_name][1])
       wrapperfuncinfo_text = wrapperfuncinfo_tpl.substitute(
         return_type = return_type,
         function_name = function_name,
@@ -726,7 +746,7 @@ Examples:
         continue
       return_type = function_data[function_name][0]
       parameters_types = function_data[function_name][1]
-      parameters = ', '.join(f"{param_name} p{i}" for i, param_name in enumerate(parameters_types))
+      parameters = get_function_parameters_str(parameters_types)
       parameters_names = ', '.join(f"p{i}" for i in range(0, len(parameters_types)))
       if return_type != 'void':
         cosmowrapper_text = cosmowrapper_tpl.substitute(
